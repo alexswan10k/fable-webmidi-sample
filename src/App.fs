@@ -12,7 +12,13 @@ type Model =  { MIDIOutputs: (string*string) list
                 SelectedMIDIOutput: string option
                 MIDIAccess: IMIDIAccess option
                 IsMIDIEnabled: bool
-                Messages: Alert list }
+                Messages: Alert list 
+                Notes: Map<byte, byte>
+                }
+
+type NoteMsg =
+    | NoteOn of byte * byte
+    | NoteOff of byte * byte
 
 type Msg = 
   | MIDIConnected of IMIDIAccess     // MIDI successfully connected
@@ -21,6 +27,40 @@ type Msg =
   | Message of Alert                 // A message
   | OutputSelected of string
   | SendNote                        // Send a MIDI note
+  | ReceiveNote of NoteMsg
+
+module Notes = 
+    type Note = 
+        | C
+        | CSharp
+        | D
+        | DSharp
+        | E
+        | F
+        | FSharp
+        | G
+        | GSharp
+        | A
+        | ASharp
+        | B
+    let (|IsOneOf|_|) (x: byte) n =
+        if [1..10] |> List.map(fun l -> ((12uy * (l |> byte)) + x) |> byte ) |> List.contains n then
+            Some ()
+        else None
+    let toNote = function
+        | IsOneOf 0uy -> C
+        | IsOneOf 1uy -> CSharp
+        | IsOneOf 2uy -> D
+        | IsOneOf 3uy -> DSharp
+        | IsOneOf 4uy -> E
+        | IsOneOf 5uy -> F
+        | IsOneOf 6uy -> FSharp
+        | IsOneOf 7uy -> G
+        | IsOneOf 8uy -> GSharp
+        | IsOneOf 9uy -> A
+        | IsOneOf 10uy -> ASharp
+        | IsOneOf 11uy -> B
+        | _ -> C
 
 open Elmish
 open Fable.Import
@@ -31,7 +71,8 @@ let init () : Model*Cmd<Msg> =
       SelectedMIDIOutput = None
       MIDIAccess = None
       IsMIDIEnabled = false
-      Messages = [] }, Cmd.ofPromise MIDI.requestAccess [ Sysex true ] MIDIConnected MIDIError
+      Messages = [] 
+      Notes = Map.empty}, Cmd.ofPromise MIDI.requestAccess [ Sysex true ] MIDIConnected MIDIError
 
 [<RequireQualifiedAccess>]
 module JSMap =
@@ -55,6 +96,13 @@ let sendNote (midiAccess: IMIDIAccess) portId =
     // timestamp = now + 1000ms.
     noteOffMessage |> output.SendAt (Browser.window.performance.now() + 1000.0)
 
+let processBytes dispatch (data: byte array)  = 
+    match data with
+    | [|248uy|] -> ()
+    | [|144uy; note; velocity|] -> NoteOn(note, velocity) |> dispatch //Fable.Import.Browser.console.log ("Note on", note, velocity)
+    | [|128uy; note; velocity|] -> NoteOff(note, velocity) |> dispatch//Fable.Import.Browser.console.log ("Note off", note, velocity)
+    | x -> Fable.Import.Browser.console.log x
+ 
 let update (msg:Msg) (model:Model) : Model*Cmd<Msg> =    
     let success = Success >> Message >> Cmd.ofMsg
     let info = Info >> Message >> Cmd.ofMsg
@@ -64,7 +112,10 @@ let update (msg:Msg) (model:Model) : Model*Cmd<Msg> =
     | MIDIConnected midiAccess -> 
         let stateChangeSub dispatch =
             midiAccess.onstatechange <- (fun (ev:IMIDIConnectionEvent) -> (dispatch MIDIStateChange))
-
+            midiAccess.inputs 
+            |> JSMap.toList 
+            |> List.map(fun (k, v: IMIDIInput) -> v.onmidimessage <- (fun d -> d.data |> processBytes (ReceiveNote >> dispatch) ))
+            |> ignore
         { model with MIDIAccess = Some midiAccess
                      IsMIDIEnabled = true }, Cmd.batch [ success "MIDI connected"
                                                          Cmd.ofSub stateChangeSub
@@ -73,6 +124,7 @@ let update (msg:Msg) (model:Model) : Model*Cmd<Msg> =
         let outputs = 
             match model.MIDIAccess with
             | Some midiAccess ->
+                
                 midiAccess.outputs 
                 |> JSMap.toList 
                 |> List.map (fun (key, o) -> key, (o.name |> Option.defaultValue "?")) 
@@ -101,6 +153,10 @@ let update (msg:Msg) (model:Model) : Model*Cmd<Msg> =
         | Some midi, Some out -> model, Cmd.ofFunc (sendNote midi) out (fun _ -> Message (Success "sent")) (fun ex -> Message (Error ex.Message))
         | Some _, None -> model, error "No Output"
         | _, _ -> model, error "No MIDI connection"
+    | ReceiveNote n ->
+        match n with
+        | NoteOn (n, v) -> {model with Notes = model.Notes |> Map.add n v}, Cmd.none
+        | NoteOff (n, v) -> {model with Notes = model.Notes |> Map.remove n}, Cmd.none
 
 open Fable.Helpers.React
 open Fable.Helpers.React.Props
@@ -141,6 +197,16 @@ let view model dispatch =
                             | Warning msg -> yield div [ ClassName "alert alert-warning" ] [ str msg ]
                             | Error msg -> yield div [ ClassName "alert alert-danger" ] [ str msg ]
                     ]
+                ]
+            ]
+
+            div [ClassName "col"] [
+                div [ ClassName "notes"] [
+                    for n in model.Notes ->
+                        div [ ClassName "card-body" ] [
+                            sprintf "%A" n |> str
+                            sprintf "Note %A" (n.Key |> Notes.toNote) |> str
+                        ]
                 ]
             ]
         ]
