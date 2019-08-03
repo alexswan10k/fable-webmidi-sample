@@ -14,11 +14,14 @@ type Model =  { MIDIOutputs: (string*string) list
                 IsMIDIEnabled: bool
                 Messages: Alert list 
                 Notes: Map<byte, byte>
+                NotesSustained: Map<byte, byte> option
                 }
 
 type NoteMsg =
     | NoteOn of byte * byte
     | NoteOff of byte * byte
+    | SustainOn
+    | SustainOff
 
 type Msg = 
   | MIDIConnected of IMIDIAccess     // MIDI successfully connected
@@ -62,6 +65,11 @@ module Notes =
         | IsOneOf 11uy -> B
         | _ -> C
 
+    let getRoot (l: byte list)= 
+        if l.Length > 0 then l |> List.min |> Some else None
+
+    let offsetAgainstRoot (root: byte) l =
+        l |> List.map (fun l -> l - root)
 open Elmish
 open Fable.Import
 open Fable.Helpers.React
@@ -72,7 +80,8 @@ let init () : Model*Cmd<Msg> =
       MIDIAccess = None
       IsMIDIEnabled = false
       Messages = [] 
-      Notes = Map.empty}, Cmd.ofPromise MIDI.requestAccess [ Sysex true ] MIDIConnected MIDIError
+      Notes = Map.empty
+      NotesSustained = None }, Cmd.ofPromise MIDI.requestAccess [ Sysex true ] MIDIConnected MIDIError
 
 [<RequireQualifiedAccess>]
 module JSMap =
@@ -101,6 +110,8 @@ let processBytes dispatch (data: byte array)  =
     | [|248uy|] -> ()
     | [|144uy; note; velocity|] -> NoteOn(note, velocity) |> dispatch //Fable.Import.Browser.console.log ("Note on", note, velocity)
     | [|128uy; note; velocity|] -> NoteOff(note, velocity) |> dispatch//Fable.Import.Browser.console.log ("Note off", note, velocity)
+    | [|176uy; 64uy; 127uy|] -> SustainOn |> dispatch
+    | [|176uy; 64uy; 0uy|] -> SustainOff |> dispatch
     | x -> Fable.Import.Browser.console.log x
  
 let update (msg:Msg) (model:Model) : Model*Cmd<Msg> =    
@@ -154,9 +165,18 @@ let update (msg:Msg) (model:Model) : Model*Cmd<Msg> =
         | Some _, None -> model, error "No Output"
         | _, _ -> model, error "No MIDI connection"
     | ReceiveNote n ->
-        match n with
-        | NoteOn (n, v) -> {model with Notes = model.Notes |> Map.add n v}, Cmd.none
-        | NoteOff (n, v) -> {model with Notes = model.Notes |> Map.remove n}, Cmd.none
+        let mNext = 
+            match n with
+            | NoteOn (n, v) -> {model with Notes = model.Notes |> Map.add n v}
+            | NoteOff (n, v) -> 
+                match model.NotesSustained with
+                | Some sustained ->
+                    {model with Notes = model.Notes |> Map.remove n; NotesSustained = sustained |> Map.add n 64uy |> Some }
+                | None ->
+                    {model with Notes = model.Notes |> Map.remove n}
+            | SustainOn -> {model with NotesSustained = Some Map.empty}
+            | SustainOff -> {model with NotesSustained = None }
+        mNext, Cmd.none
 
 open Fable.Helpers.React
 open Fable.Helpers.React.Props
@@ -201,12 +221,33 @@ let view model dispatch =
             ]
 
             div [ClassName "col"] [
-                div [ ClassName "notes"] [
+                div [ ClassName "chord" ] [
+                    let notes = model.Notes |> Map.toList |> List.map fst
+                    let root = Notes.getRoot notes
+                    match root with
+                    | Some root ->
+                        let offset = Notes.offsetAgainstRoot root notes
+
+                        yield sprintf "Root %A" (root |> Notes.toNote) |> str |> List.singleton |> div []
+                        yield sprintf "Offsets %A" offset |> str |> List.singleton |> div [] 
+                    | None -> ()
+                ]
+                div [ ClassName "notes" ] [
                     for n in model.Notes ->
                         div [ ClassName "card-body" ] [
                             sprintf "%A" n |> str
                             sprintf "Note %A" (n.Key |> Notes.toNote) |> str
                         ]
+                ]
+                div [ ClassName "sustained-notes" ] [
+                    match model.NotesSustained with
+                    | Some sustained ->
+                        for n in sustained do
+                            yield div [ ClassName "card-body" ] [
+                                sprintf "%A" n |> str
+                                sprintf "Sustained note %A" (n.Key |> Notes.toNote) |> str
+                            ]
+                    | None -> ()
                 ]
             ]
         ]
